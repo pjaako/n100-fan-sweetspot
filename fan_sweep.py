@@ -4,6 +4,7 @@ Fan curve sweep for ASRock N100DC-ITX (Intel N100, NCT6798).
 Sweeps fan2 PWM 255→0 step -15, collecting sensor data every 5s.
 Advances to next PWM step after 180s of thermal steady state (pkg_temp ±1°C).
 Aborts if package temp reaches 102°C and restores automatic fan control.
+Load: mprime Small FFTs (FMA3), 4 workers — draws ~16W vs stress-ng matrixprod's ~13W ceiling.
 """
 
 import os
@@ -20,6 +21,7 @@ HWMON_CT  = "/sys/class/hwmon/hwmon1"   # coretemp
 HWMON_NCT = "/sys/class/hwmon/hwmon2"   # nct6798
 RAPL_PKG  = "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/energy_uj"
 RAPL_PL1  = "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_0_power_limit_uw"
+RAPL_PL2  = "/sys/devices/virtual/powercap/intel-rapl/intel-rapl:0/constraint_1_power_limit_uw"
 PWM_PATH  = f"{HWMON_NCT}/pwm2"
 PWM_EN    = f"{HWMON_NCT}/pwm2_enable"
 FAN_PATH  = f"{HWMON_NCT}/fan2_input"
@@ -49,6 +51,7 @@ PL1_TARGET   = 25_000_000              # µW — set on start, restored on exit
 _stress      = None
 _orig_enable = None
 _orig_pl1    = None
+_orig_pl2    = None
 _outfile     = None
 
 
@@ -62,8 +65,9 @@ def wr(path, val):
         f.write(str(val) + "\n")
 
 
-def set_pl1(uw):
+def set_pl1_pl2(uw):
     wr(RAPL_PL1, uw)
+    wr(RAPL_PL2, uw)
 
 
 def register_run(filename, pl1_w, notes=""):
@@ -94,10 +98,16 @@ def cleanup(sig=None, frame=None):
         print(f"[cleanup] stress-ng: {e}")
     try:
         if _orig_pl1 is not None:
-            set_pl1(_orig_pl1)
+            wr(RAPL_PL1, _orig_pl1)
             print(f"[cleanup] PL1 restored to {int(_orig_pl1)//1_000_000}W", flush=True)
     except Exception as e:
         print(f"[cleanup] PL1 restore failed: {e}")
+    try:
+        if _orig_pl2 is not None:
+            wr(RAPL_PL2, _orig_pl2)
+            print(f"[cleanup] PL2 restored to {int(_orig_pl2)//1_000_000}W", flush=True)
+    except Exception as e:
+        print(f"[cleanup] PL2 restore failed: {e}")
     try:
         if _orig_enable is not None:
             wr(PWM_EN, _orig_enable)
@@ -145,9 +155,10 @@ def main():
     global _stress, _orig_enable, _orig_pl1, _outfile
 
     _orig_pl1 = rd(RAPL_PL1)
-    set_pl1(PL1_TARGET)
+    _orig_pl2 = rd(RAPL_PL2)
+    set_pl1_pl2(PL1_TARGET)
     pl1_w = PL1_TARGET // 1_000_000
-    print(f"[*] PL1 set to {pl1_w}W (was {int(_orig_pl1) // 1_000_000}W)", flush=True)
+    print(f"[*] PL1=PL2 set to {pl1_w}W (was PL1={int(_orig_pl1)//1_000_000}W PL2={int(_orig_pl2)//1_000_000}W)", flush=True)
 
     os.makedirs(DATA_DIR, exist_ok=True)
     ts_tag  = datetime.now().strftime("%Y%m%dT%H%M")
@@ -164,15 +175,30 @@ def main():
     writer.writeheader()
     _outfile.flush()
 
-    print("[*] Starting stress-ng (4 cores, matrixprod)...", flush=True)
+    mprime_dir = f"{DATA_DIR}/mprime_work"
+    os.makedirs(mprime_dir, exist_ok=True)
+    with open(f"{mprime_dir}/prime.txt", "w") as f:
+        f.write(
+            "V24OptionsConverted=1\n"
+            "CpuSupportsAVX=1\n"
+            "CpuSupportsAVX2=1\n"
+            "TortureTest=1\n"   # Small FFTs — FMA3, max FPU power
+            "TortureTime=1\n"
+            "NumCPUs=4\n"
+            "CpuNumHyperthreads=1\n"
+        )
+    wr(PWM_EN, "1")
+    wr(PWM_PATH, "255")
+    print("[*] Fan2 in manual mode at PWM=255. Waiting 10s for fan to ramp up...", flush=True)
+    time.sleep(10)
+
+    print("[*] Starting mprime (4 workers, Small FFTs / FMA3)...", flush=True)
     _stress = subprocess.Popen(
-        ["stress-ng", "--cpu", "4", "--cpu-method", "matrixprod", "-q"],
+        ["mprime", "-t", f"-W{mprime_dir}"],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-
-    wr(PWM_EN, "1")
-    print(f"[*] Fan2 in manual mode. Output → {output}\n", flush=True)
+    print(f"[*] Output → {output}\n", flush=True)
 
     # Bootstrap: get a valid initial energy reading before first sample
     prev_uj = int(rd(RAPL_PKG))
@@ -244,13 +270,13 @@ def main():
             })
             _outfile.flush()
 
-            if len(window) == STEADY_SAMPLES:
-                half = STEADY_SAMPLES // 2
+            if len(window) >= 2:
                 wlist = list(window)
-                drift = abs(sum(wlist[half:]) / half - sum(wlist[:half]) / half)
+                half = len(wlist) // 2
+                drift = abs(sum(wlist[half:]) / len(wlist[half:]) - sum(wlist[:half]) / half)
                 drift_str = f"drift={drift:.2f}°C"
             else:
-                drift_str = f"drift=--"
+                drift_str = "drift=--"
             status = "STEADY → next PWM" if steady else f"{len(window):2d}/{STEADY_SAMPLES}"
             cores_str = " ".join(f"{t:.0f}" for t in d["core_temps"])
             freqs_str = " ".join(str(f) for f in d["core_mhz"])

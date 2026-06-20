@@ -17,9 +17,10 @@ Find the minimum fan PWM at which the machine is **inaudible at 2 meters** under
 - **Tj Max** = 105°C (confirmed via `hwmon1/temp1_crit`)
 - **TCC offset** = 10°C (confirmed via `rdmsr -f 29:24 0x1a2`), **locked** (bit 31 = 1, not writable)
 - **Throttle starts at 95°C** — used as sweep stop condition in `fan_sweep.py`
-- Max all-core sustained turbo under stress-ng matrixprod: ~2900 MHz, ~13W
+- Max all-core sustained turbo under stress-ng matrixprod: ~2900 MHz, **~13W hard ceiling** regardless of PL1 setting — workload-limited, not power-limited
 - At BIOS default PL1=10W, CPU throttles to ~2500 MHz after ~28s (PL2 burst window expires)
 - **RAPL PL1 is writable** (tested up to 25W); PL2 = 25W; PL4 = 78W
+- Adding VM stressors (--vm 2 --vm-bytes 512M) produces a transient ~15W spike during page-fault init, then settles to the same ~13W — not a higher sustained power level
 - TCC MSR is locked — Tj Max and offset cannot be changed in software
 
 ## Scripts & data layout
@@ -37,7 +38,7 @@ Filename auto-generated from `PL1_TARGET` and start time. `runs.csv` gets a row 
 
 ## Planned experiment
 
-Run `fan_sweep.py` at several `PL1=PL2` values: **6W, 10W, 15W, 20W, 25W**. One CSV per run. Together they produce a family of T(pwm) curves at different sustained power levels. Separately, measure dB(A) at 2m for each PWM step (noise meter). Combined, the data maps `PWM → dB(A)` and `PWM → steady T @ power`, which is enough to derive the BIOS fan curve.
+Run `fan_sweep.py` at **PL1=PL2 = 5W, 10W, 15W, 20W**. One CSV per run. 20W is the "unconstrained" case — mprime draws ~16W so 20W gives headroom without throttling. 25W would be identical to 20W. Together they produce a family of T(pwm) curves at different sustained power levels. Separately, measure dB(A) at 2m for each PWM step (noise meter). Combined, the data maps `PWM → dB(A)` and `PWM → steady T @ power`, which is enough to derive the BIOS fan curve.
 
 ## Approaches considered — don't re-litigate these
 
@@ -57,5 +58,5 @@ PL1 is a ceiling, not a target. At full turbo the N100 draws ~13W regardless of 
 **Sweep stops at 95°C steady-state mean.**
 Above 95°C the TCC throttles frequency to hold temperature — further PWM reduction degrades performance without revealing new thermal behavior. Implemented as `TCC_TEMP = 95.0` in `fan_sweep.py`. Hard safety abort remains at 102°C.
 
-**Standard load: stress-ng, 4 cores, matrixprod.**
-Chosen for reproducibility. "Standard load" for the fan curve purpose (i.e. real workload) is still TBD.
+**Standard load: mprime Small FFTs (FMA3), 4 workers.**
+Draws ~16W sustained — higher than stress-ng matrixprod's ~13W hard ceiling (matrixprod doesn't fully utilize FMA3/AVX2). mprime config written to `fan_data/mprime_work/prime.txt` at run start.
