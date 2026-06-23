@@ -155,7 +155,7 @@ def sample(prev_uj, prev_t):
 
 
 def main():
-    global _stress, _orig_enable, _orig_pl1, _outfile
+    global _stress, _orig_enable, _orig_pl1, _orig_pl2, _outfile
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--ambient-c", type=float, default=None,
