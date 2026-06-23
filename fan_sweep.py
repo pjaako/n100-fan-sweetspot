@@ -12,6 +12,7 @@ import sys
 import csv
 import time
 import signal
+import argparse
 import subprocess
 from datetime import datetime
 from collections import deque
@@ -29,7 +30,7 @@ CPU_FREQ  = "/sys/devices/system/cpu/cpu{i}/cpufreq/scaling_cur_freq"
 
 DATA_DIR   = "/root/fan_data"
 RUNS_INDEX = f"{DATA_DIR}/runs.csv"
-INDEX_FIELDS = ["filename", "pl1_w", "pl2_w", "pwm_start", "pwm_step", "started_at", "notes"]
+INDEX_FIELDS = ["filename", "pl1_w", "pl2_w", "pwm_start", "pwm_step", "started_at", "ambient_c", "notes"]
 
 FIELDS = [
     "timestamp", "pwm", "fan2_rpm", "pkg_power_w",
@@ -70,7 +71,7 @@ def set_pl1_pl2(uw):
     wr(RAPL_PL2, uw)
 
 
-def register_run(filename, pl1_w, notes=""):
+def register_run(filename, pl1_w, ambient_c=None, notes=""):
     os.makedirs(DATA_DIR, exist_ok=True)
     write_header = not os.path.exists(RUNS_INDEX)
     with open(RUNS_INDEX, "a", newline="") as f:
@@ -84,6 +85,7 @@ def register_run(filename, pl1_w, notes=""):
             "pwm_start":  PWM_STEPS.start,
             "pwm_step":   PWM_STEPS.step,
             "started_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "ambient_c":  ambient_c if ambient_c is not None else "",
             "notes":      notes,
         })
 
@@ -122,6 +124,7 @@ def cleanup(sig=None, frame=None):
 
 signal.signal(signal.SIGINT,  cleanup)
 signal.signal(signal.SIGTERM, cleanup)
+signal.signal(signal.SIGHUP,  cleanup)
 
 
 def sample(prev_uj, prev_t):
@@ -154,6 +157,11 @@ def sample(prev_uj, prev_t):
 def main():
     global _stress, _orig_enable, _orig_pl1, _outfile
 
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ambient-c", type=float, default=None,
+                         help="Room ambient temperature in °C at run start (no on-board sensor for this)")
+    args = parser.parse_args()
+
     _orig_pl1 = rd(RAPL_PL1)
     _orig_pl2 = rd(RAPL_PL2)
     set_pl1_pl2(PL1_TARGET)
@@ -165,7 +173,7 @@ def main():
     filename = f"pl1_{pl1_w}w_{ts_tag}.csv"
     output   = f"{DATA_DIR}/{filename}"
 
-    register_run(filename, pl1_w)
+    register_run(filename, pl1_w, ambient_c=args.ambient_c)
     print(f"[*] Run registered in {RUNS_INDEX}", flush=True)
 
     _orig_enable = rd(PWM_EN)
